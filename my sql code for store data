@@ -1,0 +1,22 @@
+my sql code-
+-- Create database
+CREATE DATABASE IF NOT EXISTS image_quiz;
+USE image_quiz;
+
+-- Create users table
+CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password_hash VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create scores table
+CREATE TABLE IF NOT EXISTS scores (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    score INT NOT NULL,
+    time_taken INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);

@@ -1,0 +1,591 @@
+import numpy as np
+from PIL import Image, ImageOps, ImageTk
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.spatial.distance import euclidean
+from skimage.metrics import structural_similarity as ssim
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.preprocessing.image import img_to_array
+import os
+import random
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+from io import BytesIO
+import hashlib
+import mysql.connector
+from mysql.connector import Error
+
+class AuthSystem:
+    def __init__(self, host="localhost", 
+                 user="root", 
+                 password="Rudra@123", database="image_quiz"):
+        self.connection = None
+        self.host = host
+        self.user = user
+        self.database = database
+        self.password = password
+        self.current_user_id = None
+        self.connect()
+        
+    def connect(self):
+        try:
+            self.connection = mysql.connector.connect(
+                host=self.host,
+                user=self.user,
+                password=self.password,
+                database=self.database
+            )
+        except Error as e:
+            messagebox.showerror("Database Error", f"Error connecting to MySQL: {e}")
+            raise
+
+    def hash_password(self, password):
+        return hashlib.sha256(password.encode()).hexdigest()
+    
+    def register(self, username, password):
+        try:
+            cursor = self.connection.cursor()
+            
+            # Check if username exists
+            cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+            if cursor.fetchone():
+                return False, "Username already exists"
+            
+            if len(username) < 4:
+                return False, "Username must be at least 4 characters"
+            if len(password) < 6:
+                return False, "Password must be at least 6 characters"
+            
+            password_hash = self.hash_password(password)
+            cursor.execute(
+                "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+                (username, password_hash)
+            )
+            self.connection.commit()
+            return True, "Registration successful"
+            
+        except Error as e:
+            self.connection.rollback()
+            return False, f"Database error: {e}"
+        finally:
+            if cursor:
+                cursor.close()
+    
+    def login(self, username, password):
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(
+                "SELECT id, password_hash FROM users WHERE username = %s", 
+                (username,)
+            )
+            user = cursor.fetchone()
+            
+            if not user:
+                return False, "Username not found"
+                
+            if user['password_hash'] != self.hash_password(password):
+                return False, "Incorrect password"
+                
+            self.current_user_id = user['id']
+            return True, "Login successful"
+            
+        except Error as e:
+            return False, f"Database error: {e}"
+        finally:
+            if cursor:
+                cursor.close()
+
+    def save_score(self, score, time_taken):
+        if not self.current_user_id:
+            return False
+            
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "INSERT INTO scores (user_id, score, time_taken) VALUES (%s, %s, %s)",
+                (self.current_user_id, score, time_taken)
+            )
+            self.connection.commit()
+            return True
+        except Error as e:
+            self.connection.rollback()
+            messagebox.showerror("Database Error", f"Failed to save score: {e}")
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_user_scores(self):
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute(
+                "SELECT score, time_taken, created_at FROM scores WHERE user_id = %s ORDER BY created_at DESC",
+                (self.current_user_id,)
+            )
+            return cursor.fetchall()
+        except Error as e:
+            messagebox.showerror("Database Error", f"Failed to fetch scores: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
+
+class AuthWindow:
+    def __init__(self, root, auth_system, on_login_success):
+        self.root = root
+        self.auth_system = auth_system
+        self.on_login_success = on_login_success
+        
+        self.root.title("Image Quiz - Login/Register")
+        self.root.geometry("400x300")
+        
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(pady=10, padx=10, fill='both', expand=True)
+        
+        # Login Tab
+        self.login_frame = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.login_frame, text='Login')
+        
+        ttk.Label(self.login_frame, text="Username:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        self.login_username = ttk.Entry(self.login_frame)
+        self.login_username.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.login_frame, text="Password:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        self.login_password = ttk.Entry(self.login_frame, show="*")
+        self.login_password.grid(row=1, column=1, padx=5, pady=5)
+        
+        self.login_btn = ttk.Button(self.login_frame, text="Login", command=self.handle_login)
+        self.login_btn.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        # Register Tab
+        self.register_frame = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.register_frame, text='Register')
+        
+        ttk.Label(self.register_frame, text="Username:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        self.register_username = ttk.Entry(self.register_frame)
+        self.register_username.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.register_frame, text="Password:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        self.register_password = ttk.Entry(self.register_frame, show="*")
+        self.register_password.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(self.register_frame, text="Confirm Password:").grid(row=2, column=0, padx=5, pady=5, sticky='e')
+        self.register_confirm = ttk.Entry(self.register_frame, show="*")
+        self.register_confirm.grid(row=2, column=1, padx=5, pady=5)
+        
+        self.register_btn = ttk.Button(self.register_frame, text="Register", command=self.handle_register)
+        self.register_btn.grid(row=3, column=0, columnspan=2, pady=10)
+    
+    def handle_login(self):
+        username = self.login_username.get()
+        password = self.login_password.get()
+        
+        if not username or not password:
+            messagebox.showerror("Error", "Please enter both username and password")
+            return
+        
+        success, message = self.auth_system.login(username, password)
+        if success:
+            messagebox.showinfo("Success", message)
+            self.on_login_success(username)
+        else:
+            messagebox.showerror("Error", message)
+    
+    def handle_register(self):
+        username = self.register_username.get()
+        password = self.register_password.get()
+        confirm = self.register_confirm.get()
+        
+        if not username or not password:
+            messagebox.showerror("Error", "Please enter both username and password")
+            return
+        if password != confirm:
+            messagebox.showerror("Error", "Passwords do not match")
+            return
+        
+        success, message = self.auth_system.register(username, password)
+        if success:
+            messagebox.showinfo("Success", message)
+            self.notebook.select(0)  # Switch to login tab
+            self.login_username.delete(0, tk.END)
+            self.login_username.insert(0, username)
+            self.login_password.focus()
+        else:
+            messagebox.showerror("Error", message)
+
+class ImageQuizApp:
+    def __init__(self, root, original_folder, modified_folder, num_questions=5):
+        self.root = root
+        self.root.title("Image Pattern Quiz")
+        self.original_folder = original_folder
+        self.modified_folder = modified_folder
+        self.num_questions = num_questions
+        self.model = self.load_vgg16_model()
+        
+        # Authentication system with MySQL
+        self.auth_system = AuthSystem()
+        self.current_user = None
+        
+        # Show auth window first
+        self.show_auth_window()
+    
+    def show_auth_window(self):
+        # Clear any existing widgets
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        
+        # Create auth window
+        AuthWindow(self.root, self.auth_system, self.on_login_success)
+    
+    def on_login_success(self, username):
+        self.current_user = username
+        
+        # Clear any existing widgets
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        
+        # Initialize quiz components
+        self.questions = []
+        self.current_question = 0
+        self.score = 0
+        self.start_time = 0
+        self.question_times = []
+        self.results = []
+        self.correct_indices = []
+        
+        self.load_questions()
+        self.setup_ui()
+        self.show_question()
+    
+    def load_vgg16_model(self):
+        return VGG16(weights='imagenet', include_top=False, input_shape=(100, 100, 3))
+    
+    def extract_features(self, image):
+        image = image.resize((100, 100))
+        image_array = img_to_array(image)
+        if image_array.shape[-1] == 1:
+            image_array = np.repeat(image_array, 3, axis=-1)
+        image_array = np.expand_dims(image_array, axis=0)
+        image_array = preprocess_input(image_array)
+        features = self.model.predict(image_array)
+        return features.flatten()
+    
+    def extract_image_patches_with_border(self, img, border_size=5, border_color="black"):
+        positions = [(0, 0), (110, 0), (0, 110), (110, 110)]
+        image_patches = []
+        for pos in positions:
+            patch = img.crop((pos[0], pos[1], pos[0] + 100, pos[1] + 100))
+            patch_with_border = ImageOps.expand(patch, border=border_size, fill=border_color)
+            image_patches.append(patch_with_border)
+        return image_patches
+    
+    def merge_image_patches_with_borders(self, patches, border_size=5, border_color="black"):
+        new_img_size = (220 + border_size * 2, 220 + border_size * 2)
+        new_img = Image.new('RGB', new_img_size, color=border_color)
+        positions = [(border_size, border_size),
+                     (110 + border_size, border_size),
+                     (border_size, 110 + border_size),
+                     (110 + border_size, 110 + border_size)]
+        for patch, pos in zip(patches, positions):
+            new_img.paste(patch, pos)
+        return new_img
+    
+    def compute_cosine_similarity(self, features1, features2):
+        return cosine_similarity([features1], [features2])[0][0]
+    
+    def compute_ssim(self, image1, image2):
+        image1_gray = np.array(image1.convert('L'))
+        image2_gray = np.array(image2.convert('L'))
+        return ssim(image1_gray, image2_gray)
+    
+    def compute_euclidean_distance(self, features1, features2):
+        return euclidean(features1, features2)
+    
+    def rotate_image(self, image, angle):
+        return image.rotate(angle)
+    
+    def load_questions(self):
+        original_images = sorted(os.listdir(self.original_folder))
+        modified_images = sorted(os.listdir(self.modified_folder))
+        if len(original_images) != len(modified_images):
+            messagebox.showerror("Error", "Folder contents don't match")
+            return
+        
+        selected_indices = random.sample(range(len(original_images)), self.num_questions)
+        for idx in selected_indices:
+            original_path = os.path.join(self.original_folder, original_images[idx])
+            modified_path = os.path.join(self.modified_folder, modified_images[idx])
+            self.questions.append((original_path, modified_path))
+    
+    def setup_ui(self):
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # User info
+        user_frame = ttk.Frame(self.main_frame)
+        user_frame.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(user_frame, text=f"User: {self.current_user}").pack(side=tk.LEFT)
+        ttk.Button(user_frame, text="Logout", command=self.show_auth_window).pack(side=tk.RIGHT)
+        
+        # Question Image
+        self.question_image_label = ttk.Label(self.main_frame)
+        self.question_image_label.pack(pady=10)
+        
+        # Options Frame (horizontal layout)
+        self.options_frame = ttk.Frame(self.main_frame)
+        self.options_frame.pack(pady=20)
+        
+        # Timer Label
+        self.timer_label = ttk.Label(self.main_frame, text="Time left: 30s")
+        self.timer_label.pack(pady=5)
+        
+        # Navigation Frame
+        nav_frame = ttk.Frame(self.main_frame)
+        nav_frame.pack(pady=10)
+        
+        self.prev_button = ttk.Button(nav_frame, text="Previous", command=self.prev_question)
+        self.prev_button.pack(side="left", padx=5)
+        self.next_button = ttk.Button(nav_frame, text="Next", command=self.next_question)
+        self.next_button.pack(side="left", padx=5)
+        
+        # Results Frame (hidden initially)
+        self.results_frame = ttk.Frame(self.root)
+        self.results_text = tk.Text(self.results_frame, wrap=tk.WORD, width=60, height=15)
+        scrollbar = ttk.Scrollbar(self.results_frame, command=self.results_text.yview)
+        self.results_text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.results_text.pack(pady=10)
+        ttk.Button(self.results_frame, text="Retry", command=self.restart_quiz).pack(side=tk.LEFT, padx=5)
+        ttk.Button(self.results_frame, text="Logout", command=self.show_auth_window).pack(side=tk.RIGHT, padx=5)
+    
+    def process_question(self, full_image, modified_image):
+        full_patches = self.extract_image_patches_with_border(full_image)
+        modified_patches = self.extract_image_patches_with_border(modified_image)
+        
+        full_features = [self.extract_features(patch) for patch in full_patches]
+        modified_features = [self.extract_features(patch) for patch in modified_patches]
+        
+        cosine_sims = []
+        ssim_scores = []
+        euclidean_dists = []
+        
+        for m_feat, m_patch in zip(modified_features, modified_patches):
+            c_sims = []
+            s_scores = []
+            e_dists = []
+            for f_feat, f_patch in zip(full_features, full_patches):
+                c_sims.append(self.compute_cosine_similarity(m_feat, f_feat))
+                s_scores.append(self.compute_ssim(m_patch, f_patch))
+                e_dists.append(self.compute_euclidean_distance(m_feat, f_feat))
+            cosine_sims.append(c_sims)
+            ssim_scores.append(s_scores)
+            euclidean_dists.append(e_dists)
+        
+        missing_index = -1
+        cos_threshold = 0.9
+        ssim_threshold = 0.8
+        euc_threshold = 0.5
+        
+        for i in range(len(cosine_sims)):
+            if (max(cosine_sims[i]) < cos_threshold and
+                max(ssim_scores[i]) < ssim_threshold and
+                min(euclidean_dists[i]) > euc_threshold):
+                missing_index = i
+                break
+        
+        if missing_index == -1:
+            messagebox.showerror("Error", "No missing image found")
+            return None
+        
+        correct_feature = full_features[missing_index]
+        distractors = []
+        distractor_indices = [i for i in range(4) if i != missing_index]
+        
+        for idx in distractor_indices:
+            distractor_patch = modified_patches[idx]
+            distractor_feature = modified_features[idx]
+            if self.compute_euclidean_distance(correct_feature, distractor_feature) > euc_threshold:
+                distractors.append(distractor_patch)
+        
+        while len(distractors) < 3:
+            distractor = random.choice(modified_patches)
+            distractor_rot = self.rotate_image(distractor, random.choice([65, 145, 230]))
+            distractors.append(distractor_rot)
+        
+        correct_image = full_patches[missing_index]
+        options = distractors[:3] + [correct_image]
+        random.shuffle(options)
+        correct_option_index = options.index(correct_image)
+        
+        modified_image_with_borders = self.merge_image_patches_with_borders(modified_patches)
+        
+        return {
+            'modified_image': modified_image_with_borders,
+            'options': options,
+            'correct_index': correct_option_index
+        }
+    
+    def show_question(self):
+        self.clear_options()
+        self.start_timer()
+        
+        original_path, modified_path = self.questions[self.current_question]
+        full_image = Image.open(original_path)
+        modified_image = Image.open(modified_path)
+        
+        question_data = self.process_question(full_image, modified_image)
+        if question_data is None:
+            return
+        
+        self.correct_indices.append(question_data['correct_index'])
+        self.display_question(question_data)
+        self.update_navigation_buttons()
+    
+    def display_question(self, question_data):
+        # Display question image
+        modified_img = question_data['modified_image'].resize((400, 400))
+        self.question_img = ImageTk.PhotoImage(modified_img)
+        self.question_image_label.configure(image=self.question_img)
+        
+        # Display options horizontally
+        self.option_buttons = []
+        for i, option_img in enumerate(question_data['options']):
+            img = option_img.resize((150, 150))
+            photo = ImageTk.PhotoImage(img)
+            
+            option_frame = ttk.Frame(self.options_frame)
+            option_frame.pack(side="left", padx=10, pady=10)
+            
+            label = ttk.Label(option_frame, image=photo)
+            label.image = photo  # Keep reference
+            label.pack()
+            
+            btn = ttk.Button(option_frame, text=f"Option {i+1}", 
+                            command=lambda idx=i: self.check_answer(idx))
+            btn.pack()
+            
+            self.option_buttons.append(btn)
+    
+    def start_timer(self):
+        self.time_left = 30
+        self.timer_label.config(text=f"Time left: {self.time_left}s")
+        self.timer_running = True
+        self.update_timer()
+    
+    def update_timer(self):
+        if self.timer_running and self.time_left > 0:
+            self.time_left -= 1
+            self.timer_label.config(text=f"Time left: {self.time_left}s")
+            self.root.after(1000, self.update_timer)
+        elif self.time_left == 0:
+            self.handle_timeout()
+    
+    def handle_timeout(self):
+        self.timer_running = False
+        self.question_times.append(30)
+        self.results.append((self.current_question, "Timeout", 30))
+        messagebox.showinfo("Timeout", "Time's up for this question!")
+        self.next_question()
+    
+    def check_answer(self, selected_index):
+        self.timer_running = False
+        time_taken = 30 - self.time_left
+        self.question_times.append(time_taken)
+        
+        correct_index = self.correct_indices[self.current_question]
+        if selected_index == correct_index:
+            self.score += 1
+            result = "Correct"
+        else:
+            result = "Incorrect"
+        
+        self.results.append((self.current_question, result, time_taken))
+        
+        # Highlight correct answer
+        for btn in self.option_buttons:
+            btn.state(['disabled'])
+        
+        # Show feedback
+        feedback = f"Your answer was {result} (Time: {time_taken}s)"
+        if result == "Incorrect":
+            feedback += f"\nCorrect answer was Option {correct_index+1}"
+        
+        messagebox.showinfo("Result", feedback)
+        self.root.after(1000, self.next_question)  # Move to next question after 1 second
+    
+    def next_question(self):
+        if self.current_question < self.num_questions - 1:
+            self.current_question += 1
+            self.show_question()
+        else:
+            self.show_results()
+    
+    def prev_question(self):
+        if self.current_question > 0:
+            self.current_question -= 1
+            self.show_question()
+    
+    def update_navigation_buttons(self):
+        self.prev_button['state'] = 'normal' if self.current_question > 0 else 'disabled'
+        self.next_button['state'] = 'normal' if self.current_question < self.num_questions-1 else 'disabled'
+        if self.current_question == self.num_questions-1:
+            self.next_button['text'] = 'Finish'
+        else:
+            self.next_button['text'] = 'Next'
+    
+    def show_results(self):
+        self.main_frame.pack_forget()
+        self.results_frame.pack(fill=tk.BOTH, expand=True)
+        
+        total_time = sum(self.question_times)
+        max_time = 30 * self.num_questions
+        percentage = (self.score / self.num_questions) * 100
+        
+        results_text = f"Quiz Results\n{'='*40}\n"
+        results_text += f"User: {self.current_user}\n"
+        results_text += f"Final Score: {self.score} out of {self.num_questions} ({percentage:.1f}%)\n"
+        results_text += f"Total Time: {total_time} seconds (Maximum possible: {max_time}s)\n\n"
+        results_text += "Question Details:\n"
+        
+        for q_num, result, time in self.results:
+            results_text += f"Q{q_num+1}: {result} ({time}s)\n"
+        
+        # Add previous scores from database
+        scores = self.auth_system.get_user_scores()
+        if scores:
+            results_text += "\nPrevious Attempts:\n"
+            for i, score in enumerate(scores[:5]):  # Show last 5 attempts
+                results_text += f"{i+1}. Score: {score['score']}/{self.num_questions}, Time: {score['time_taken']}s ({score['created_at']})\n"
+        
+        self.results_text.delete(1.0, tk.END)
+        self.results_text.insert(tk.END, results_text)
+        
+        # Save the score to database
+        self.auth_system.save_score(self.score, total_time)
+    
+    def restart_quiz(self):
+        self.results_frame.pack_forget()
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        self.current_question = 0
+        self.score = 0
+        self.question_times = []
+        self.results = []
+        self.correct_indices = []
+        self.load_questions()
+        self.show_question()
+    
+    def clear_options(self):
+        for widget in self.options_frame.winfo_children():
+            widget.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.geometry("900x700")
+    
+    # Update these paths to your image folders
+    original_folder = r"G:\My Drive\alphabet"
+    modified_folder = r"G:\My Drive\A...modified"
+    
+    app = ImageQuizApp(root, original_folder, modified_folder, num_questions=5)
+    root.mainloop()

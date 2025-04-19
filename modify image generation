@@ -1,0 +1,41 @@
+from PIL import Image
+
+# Function to remove one of the images from a user-provided grid image
+def remove_one_rotated_image(input_image_path, missing_index=2):
+    # Load the user-provided image
+    img = Image.open(input_image_path).convert('L')  # Convert to grayscale if not already
+
+    # Get the actual size of the image
+    img_width, img_height = img.size
+
+    # Calculate image and padding sizes dynamically
+    padding = (img_width - 200) // 2  # Dynamically calculate the padding
+    image_size = (img_width - padding) // 2  # Calculate the size of individual images based on total image size
+
+    # Ensure the input image size is valid
+    if (img_width - padding) % 2 != 0 or (img_height - padding) % 2 != 0:
+        print(f"Error: Image dimensions are not evenly divisible.")
+        return
+
+    # Create a new blank canvas for the modified image
+    canvas = Image.new('L', (img_width, img_height), color=255)  # 'L' for grayscale mode (white background)
+
+    # Coordinates for placing images in the 2x2 grid
+    positions = [(0, 0), (image_size + padding, 0), (0, image_size + padding), (image_size + padding, image_size + padding)]
+
+    # Loop through each position and copy the corresponding image part from the original
+    for i, pos in enumerate(positions):
+        if i == missing_index:
+            continue  # Skip this index to leave it blank
+        # Crop the corresponding region from the original image
+        region = img.crop((pos[0], pos[1], pos[0] + image_size, pos[1] + image_size))
+        # Paste it onto the new canvas
+        canvas.paste(region, pos)
+
+    # Save the modified image
+    output_path = "modified_arrow_image.jpg"
+    canvas.save(output_path)
+    print(f"Modified image saved as {output_path}")
+
+# Example usage
+remove_one_rotated_image(r"C:\Users\Trilochan Sahu\Downloads\rotated_2arrow_image.jpg", missing_index=2)
